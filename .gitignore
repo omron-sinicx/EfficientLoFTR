@@ -9,4 +9,7 @@ tmp.*
 
 logs/
 weights/
-dump/
+worktrees/
+data/shared/**
+!data/shared/.gitkeep
+data/local/

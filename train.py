@@ -9,7 +9,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.utilities import rank_zero_only
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from pytorch_lightning.plugins import DDPPlugin, NativeMixedPrecisionPlugin
+from pytorch_lightning.strategies import DDPStrategy
 
 from src.config.default import get_cfg_defaults
 from src.utils.misc import get_rank_zero_only_logger, setup_gpus
@@ -61,7 +61,14 @@ def parse_args():
     parser.add_argument(
         '--deter', action='store_true', help='use deterministic mode for training')
 
-    parser = pl.Trainer.add_argparse_args(parser)
+    # pytorch-lightning 2.x では add_argparse_args は非推奨
+    # 必要な引数を手動で追加
+    parser.add_argument('--accelerator', type=str, default='auto')
+    parser.add_argument('--devices', type=str, default='auto')
+    parser.add_argument('--num_nodes', type=int, default=1)
+    parser.add_argument('--precision', type=str, default='16-mixed')
+    parser.add_argument('--max_epochs', type=int, default=None)
+    parser.add_argument('--gpus', type=str, default=None, help='Deprecated: use --devices instead')
     return parser.parse_args()
 
 def inplace_relu(m):
@@ -130,19 +137,27 @@ def main():
     if not args.disable_ckpt:
         callbacks.append(ckpt_callback)
 
-    # Lightning Trainer
-    trainer = pl.Trainer.from_argparse_args(
-        args,
-        plugins=[DDPPlugin(find_unused_parameters=False,
-                          num_nodes=args.num_nodes,
-                          sync_batchnorm=config.TRAINER.WORLD_SIZE > 0), NativeMixedPrecisionPlugin()],
+    # Lightning Trainer (pytorch-lightning 2.x compatible)
+    # 精度設定
+    precision = '32' if args.disable_mp else args.precision
+
+    # デバイス設定（後方互換性のため gpus 引数もサポート）
+    devices = args.devices
+    if args.gpus is not None:
+        devices = args.gpus
+
+    trainer = pl.Trainer(
+        accelerator=args.accelerator,
+        devices=devices,
+        num_nodes=args.num_nodes,
+        precision=precision,
+        max_epochs=args.max_epochs,
+        strategy=DDPStrategy(find_unused_parameters=False),
         gradient_clip_val=config.TRAINER.GRADIENT_CLIPPING,
         callbacks=callbacks,
         logger=logger,
         sync_batchnorm=config.TRAINER.WORLD_SIZE > 0,
-        replace_sampler_ddp=False,  # use custom sampler
-        reload_dataloaders_every_epoch=False,  # avoid repeated samples!
-        weights_summary='full',
+        use_distributed_sampler=False,  # use custom sampler (was replace_sampler_ddp)
         profiler=profiler)
     loguru_logger.info(f"Trainer initialized!")
     loguru_logger.info(f"Start training!")
